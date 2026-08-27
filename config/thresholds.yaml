@@ -1,0 +1,178 @@
+# SAT-SA Configuration — Prototype Supervisory Risk Model
+# All thresholds are prototype defaults, NOT official NCIIPC weights.
+# Edit this file to tune detection without touching Python code.
+# Offline-safe: pure YAML, no code execution.
+
+# ------------------------------------------------------------------
+# Ingestion & Validation
+# ------------------------------------------------------------------
+ingestion:
+  max_file_mb: 50
+  max_rows: 200000
+  required_columns:
+    - cse_id
+    - alert_id
+    - asset_id
+    - severity
+    - alert_type
+    - created_time
+    - acknowledged_time
+    - closure_time
+    - escalated
+    - disposition
+    - investigation_evidence
+    - asset_criticality
+    - expected_activity
+    - observed_activity
+  # Optional but validated if present
+  optional_columns:
+    - investigation_start
+    - investigation_end
+    - investigation_notes
+
+validation:
+  severity_allowlist: ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+  disposition_allowlist: ["True Positive", "False Positive", "Benign True Positive", "Under Investigation", "Escalated to Tier-2"]
+  asset_criticality_allowlist: ["CRITICAL", "HIGH", "MEDIUM"]
+  # Boolean fields must be one of these string representations (case-insensitive) or native bool
+  boolean_true_values: ["true", "1", "yes", "y", "t"]
+  boolean_false_values: ["false", "0", "no", "n", "f", ""]
+  # Time sequence checks
+  allow_closure_before_ack: false
+  allow_investigation_before_ack: false
+
+# ------------------------------------------------------------------
+# Preprocessing / Feature Engineering
+# ------------------------------------------------------------------
+preprocessing:
+  rapid_closure_minutes: 5          # CRITICAL closed in < X minutes (from created_time) is suspicious
+  activity_coverage_threshold: 50   # observed/expected*100 < 50 → negative-space flag
+  activity_coverage_clip_max: 100
+  investigation_present_flag: true
+
+# ------------------------------------------------------------------
+# Rule Engine (10 rules)
+# ------------------------------------------------------------------
+rules:
+  R01_critical_not_escalated:
+    enabled: true
+    severity: "HIGH"
+    score: 15
+    description: "CRITICAL alert was not escalated"
+  R02_critical_no_investigation:
+    enabled: true
+    severity: "CRITICAL"
+    score: 20
+    description: "CRITICAL alert closed without investigation evidence"
+  R03_evidence_missing:
+    enabled: true
+    severity: "MEDIUM"
+    score: 10
+    description: "Required investigation evidence missing"
+  R04_investigation_skipped:
+    enabled: true
+    severity: "MEDIUM"
+    score: 10
+    description: "Investigation start/end missing despite acknowledgement"
+  R05_rapid_closure:
+    enabled: true
+    severity: "HIGH"
+    score: 18
+    description: "Alert closed unusually fast (CRITICAL <5 min)"
+  R06_repeated_alert_handling:
+    enabled: true
+    severity: "LOW"
+    score: 5
+    description: "Repeated asset+type alerts with identical handling (potential copy-paste closure)"
+  R07_false_positive_concentration:
+    enabled: true
+    severity: "MEDIUM"
+    score: 12
+    description: "High false-positive concentration (>40% of CSE alerts)"
+  R08_low_investigation_activity:
+    enabled: true
+    severity: "MEDIUM"
+    score: 12
+    description: "CSE investigation rate significantly below peer median"
+  R09_critical_asset_under_monitored:
+    enabled: true
+    severity: "HIGH"
+    score: 14
+    description: "CRITICAL asset with low observed activity (<50% coverage)"
+  R10_backlog_anomaly:
+    enabled: true
+    severity: "LOW"
+    score: 8
+    description: "Abnormal alert backlog / workload imbalance"
+
+# ------------------------------------------------------------------
+# Risk Scoring — Prototype Supervisory Risk Model
+# ------------------------------------------------------------------
+risk_scoring:
+  # Weights must sum to 1.0
+  weights:
+    rule_violations: 0.30
+    execution_gaps: 0.25
+    anomaly: 0.20
+    peer_deviation: 0.15
+    criticality: 0.10
+  # Risk bands (0-100 score)
+  bands:
+    critical: 80
+    high: 60
+    moderate: 30
+    # 0-30 LOW, 31-60 MODERATE, 61-80 HIGH, 81-100 CRITICAL
+
+# ------------------------------------------------------------------
+# Negative Space & Process Mining
+# ------------------------------------------------------------------
+negative_space:
+  activity_threshold: 50
+  workflow:
+    CRITICAL: ["Ack", "Investigation", "Escalation", "Resolution", "Evidence"]
+    HIGH: ["Ack", "Investigation", "Resolution", "Evidence"]
+    MEDIUM: ["Ack", "Investigation", "Resolution"]
+    LOW: ["Ack", "Resolution"]
+  # Gap severity mapping is code-defined; workflow above is configurable
+
+process_mining:
+  deviation_global_share_threshold: 2.0
+  deviation_cse_share_threshold: 10.0
+
+# ------------------------------------------------------------------
+# Anomaly Detection
+# ------------------------------------------------------------------
+anomaly:
+  contamination: 0.20
+  random_state: 42
+  # Feature list for IsolationForest (must exist after preprocessing)
+  features:
+    - total_alerts
+    - critical_alerts
+    - execution_gaps
+    - negative_space
+    - avg_activity_coverage
+    - avg_closure_minutes
+    - escalation_rate
+    - investigation_rate
+
+# ------------------------------------------------------------------
+# Peer Analysis
+# ------------------------------------------------------------------
+temporal:
+  z_threshold: 2.0
+  min_months: 3
+
+peer:
+  min_group_size: 3
+  z_threshold: 1.5        # |z| > 1.5 → significant deviation
+  percentile_low: 10
+  percentile_high: 90
+
+# ------------------------------------------------------------------
+# Logging / Audit
+# ------------------------------------------------------------------
+audit:
+  log_dir: "logs"
+  log_level: "INFO"
+  retain_runs: 50
